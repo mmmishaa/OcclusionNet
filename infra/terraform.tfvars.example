@@ -1,0 +1,16 @@
+organization_id = "***"
+cloud_id  = "***"
+folder_id = "***"
+billing_account_id = "***"
+
+duckdns_subdomain = "***"
+duckdns_token     = "***"
+
+acme_email           = "test@example.com"
+ssh_cidr             = "0.0.0.0/0"
+clearml_web_password = "***"
+bucket_name          = "***"
+
+# --- DataSphere ---
+enable_datasphere  = true
+datasphere_members = ["group:***"]
