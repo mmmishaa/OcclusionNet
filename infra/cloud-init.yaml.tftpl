@@ -1,0 +1,158 @@
+#cloud-config
+# Разворачивает ClearML Server за Caddy с сертификатами Let's Encrypt.
+# Секреты берутся из Lockbox через сервисный аккаунт ВМ.
+#
+# ВНИМАНИЕ по экранированию. templatefile перехватывает только доллар или
+# процент, за которым идёт фигурная скобка. Подстановку переменных шелла в
+# фигурных скобках здесь не используем вовсе, поэтому все $(...) и $VAR
+# пишутся как обычно. Удвоенный доллар не ставить: он превратится в PID.
+#
+# Литеральные последовательности из доллара и фигурной скобки нельзя писать
+# даже в комментариях этого файла — рендер упадёт.
+
+package_update: true
+packages:
+  - jq
+  - curl
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+
+write_files:
+  # Elasticsearch без явного heap забирает половину памяти хоста.
+  # На 8 ГБ это 4 ГБ, и остальным компонентам остаётся впритык.
+  - path: /opt/clearml/docker-compose.override.yml
+    content: |
+      services:
+        elasticsearch:
+          environment:
+            ES_JAVA_OPTS: -Xms2g -Xmx2g
+
+  # Caddyfile здесь НЕ создаём. Пакет caddy поставляет собственный конфиг по
+  # этому пути, и если положить свой заранее, dpkg при установке спросит, чей
+  # оставить. stdin у cloud-init закрыт, установка падает с
+  # "end of file on stdin at conffile prompt", пакет остаётся ненастроенным.
+  # Конфиг пишем в bootstrap.sh уже после apt-get install.
+
+  # Публичный IP динамический: после остановки и запуска ВМ он меняется,
+  # и без обновления записи домен будет указывать в никуда.
+  - path: /usr/local/bin/duckdns-update.sh
+    permissions: "0700"
+    content: |
+      #!/bin/bash
+      # ip не передаём — DuckDNS подставит адрес источника запроса
+      curl -fsS "https://www.duckdns.org/update?domains=${duckdns_subdomain}&token=${duckdns_token}" \
+        >> /var/log/duckdns.log 2>&1
+      echo >> /var/log/duckdns.log
+
+  - path: /usr/local/bin/bootstrap.sh
+    permissions: "0700"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      exec > >(tee -a /var/log/bootstrap.log) 2>&1
+
+      echo "== DNS: указываем домен на этот хост =="
+      /usr/local/bin/duckdns-update.sh
+      sleep 10
+
+      echo "== Elasticsearch требует поднятый лимит карт памяти =="
+      sysctl -w vm.max_map_count=524288
+      echo "vm.max_map_count=524288" > /etc/sysctl.d/99-clearml.conf
+
+      echo "== Секреты из Lockbox =="
+      IAM_TOKEN=$(curl -sf -H "Metadata-Flavor: Google" \
+        "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token" \
+        | jq -r .access_token)
+      PAYLOAD=$(curl -sf -H "Authorization: Bearer $IAM_TOKEN" \
+        "https://payload.lockbox.api.cloud.yandex.net/lockbox/v1/secrets/${secret_id}/payload")
+      S3_KEY=$(echo "$PAYLOAD"    | jq -r '.entries[] | select(.key=="s3-access-key") | .textValue')
+      S3_SECRET=$(echo "$PAYLOAD" | jq -r '.entries[] | select(.key=="s3-secret-key") | .textValue')
+      WEB_PASS=$(echo "$PAYLOAD"  | jq -r '.entries[] | select(.key=="web-password")  | .textValue')
+      test -n "$S3_KEY" -a -n "$WEB_PASS"
+      echo "секреты получены"
+
+      echo "== Docker =="
+      curl -fsSL https://get.docker.com | sh
+
+      echo "== ClearML Server =="
+      mkdir -p /opt/clearml/config
+      mkdir -p /opt/clearml/data/elastic_7
+      mkdir -p /opt/clearml/data/mongo_4/db /opt/clearml/data/mongo_4/configdb
+      mkdir -p /opt/clearml/data/redis /opt/clearml/data/fileserver
+      mkdir -p /opt/clearml/logs
+      chown -R 1000:1000 /opt/clearml/data /opt/clearml/logs
+      curl -fsSL -o /opt/clearml/docker-compose.yml \
+        https://raw.githubusercontent.com/clearml/clearml-server/master/docker/docker-compose.yml
+
+      # Без этого сервер открыт на запись любому, кто знает адрес.
+      cat > /opt/clearml/config/apiserver.conf <<CONF
+      auth {
+        fixed_users {
+          enabled: true
+          pass_hashed: false
+          users: [
+            { username: "admin", password: "$WEB_PASS", name: "Admin" }
+          ]
+        }
+      }
+      CONF
+      chmod 600 /opt/clearml/config/apiserver.conf
+
+      # Артефакты идут напрямую в Object Storage мимо fileserver.
+      cat > /opt/clearml/config/clearml.conf <<CONF
+      sdk {
+        development.default_output_uri: "s3://storage.yandexcloud.net:443/${bucket_name}"
+        aws.s3 {
+          region: "ru-central1"
+          credentials: [{
+            host: "storage.yandexcloud.net:443"
+            key: "$S3_KEY"
+            secret: "$S3_SECRET"
+            secure: true
+          }]
+        }
+      }
+      CONF
+      chmod 600 /opt/clearml/config/clearml.conf
+
+      cd /opt/clearml && docker compose up -d
+
+      echo "== Caddy: сначала пакет, потом конфиг =="
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+        > /etc/apt/sources.list.d/caddy-stable.list
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        -o Dpkg::Options::=--force-confold caddy
+
+      cat > /etc/caddy/Caddyfile <<'CADDY'
+      {
+        email ${acme_email}
+      }
+
+      ${app_host} {
+        reverse_proxy localhost:8080
+      }
+
+      ${api_host} {
+        reverse_proxy localhost:8008
+      }
+
+      ${files_host} {
+        reverse_proxy localhost:8081
+      }
+      CADDY
+
+      systemctl enable --now caddy
+      systemctl reload caddy || systemctl restart caddy
+
+      # Маркер успеха: по нему проверяем, что скрипт дошёл до конца
+      touch /var/lib/clearml-bootstrap-done
+      echo "== Готово =="
+
+runcmd:
+  - /usr/local/bin/bootstrap.sh
+  # IP меняется при каждом запуске остановленной ВМ — держим запись свежей
+  - echo "*/5 * * * * root /usr/local/bin/duckdns-update.sh" > /etc/cron.d/duckdns
