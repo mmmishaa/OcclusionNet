@@ -47,14 +47,17 @@ write_files:
       /opt/venv/bin/pip install --quiet --upgrade pip
       /opt/venv/bin/pip install --quiet pillow numpy pyarrow pyyaml
 
-      # Именно profile.d, а не ~/.bashrc: стандартный ubuntu-шный .bashrc
-      # выходит на первой же строке в неинтерактивной сессии, поэтому при
-      # "ssh host команда" ни venv, ни переменная не подхватились бы. Заезд
-      # запускается как раз неинтерактивно.
-      cat > /etc/profile.d/occlusionnet.sh <<'PROFILE'
-      export PATH=/opt/venv/bin:$PATH
-      PROFILE
-      echo "export DATASETS_BUCKET=${bucket}" >> /etc/profile.d/occlusionnet.sh
+      # Имя бакета — в /etc/environment, и только туда. Заезды запускаются
+      # как "ssh host команда", то есть в non-login non-interactive шелле:
+      # он не читает ни ~/.bashrc (тот выходит на первой строке вне
+      # интерактива), ни /etc/profile с его profile.d. /etc/environment
+      # разбирает pam_env при самом входе, до всякого шелла, поэтому
+      # переменная видна во всех режимах.
+      echo "DATASETS_BUCKET=${bucket}" >> /etc/environment
+
+      # PATH через profile.d — это удобство для интерактивной работы.
+      # Скрипты на venv не полагаются и зовут /opt/venv/bin/python явно.
+      echo 'export PATH=/opt/venv/bin:$PATH' > /etc/profile.d/occlusionnet.sh
       chmod 644 /etc/profile.d/occlusionnet.sh
 
       mkdir -p /home/ubuntu/work
