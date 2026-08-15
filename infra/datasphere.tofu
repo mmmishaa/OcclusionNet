@@ -15,6 +15,10 @@ locals {
   ds_bucket = var.datasphere_bucket_name != "" ? var.datasphere_bucket_name : "${local.bucket_name}-datasets"
   ds_count  = var.enable_datasphere ? 1 : 0
 
+  # Бакет под датасеты нужен и без DataSphere: заездная ВМ складывает сырьё
+  # и манифесты именно туда. Поэтому у него собственный счётчик.
+  ds_bucket_count = (var.enable_datasphere || var.enable_data_vm) ? 1 : 0
+
   # Обе роли выдаются НА СООБЩЕСТВЕ: права распространяются вниз по иерархии,
   # поэтому проектная роль покрывает и текущий проект, и все будущие. Привязка
   # людей к конкретному проекту потребовала бы правки Terraform на каждый новый.
@@ -108,7 +112,7 @@ resource "yandex_datasphere_project" "main" {
 # --- Бакет под датасеты ---------------------------------------------------
 
 resource "yandex_storage_bucket" "datasets" {
-  count = local.ds_count
+  count = local.ds_bucket_count
 
   bucket = local.ds_bucket
 

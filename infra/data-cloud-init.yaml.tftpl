@@ -1,0 +1,67 @@
+#cloud-config
+# Заездная машина: python с зависимостями инвентаризации и настроенный s3cmd.
+# Ничего постоянного здесь не живёт — машина одноразовая.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - jq
+  - curl
+  - unzip
+  - aria2
+  - python3-venv
+  - python3-pip
+  - s3cmd
+
+write_files:
+  - path: /usr/local/bin/bootstrap.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      exec > >(tee -a /var/log/bootstrap.log) 2>&1
+
+      echo "=== S3-ключи из Lockbox ==="
+      IAM_TOKEN=$(curl -sf -H "Metadata-Flavor: Google" \
+        "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token" \
+        | jq -r .access_token)
+      PAYLOAD=$(curl -sf -H "Authorization: Bearer $IAM_TOKEN" \
+        "https://payload.lockbox.api.cloud.yandex.net/lockbox/v1/secrets/${secret_id}/payload")
+      S3_KEY=$(echo "$PAYLOAD"    | jq -r '.entries[] | select(.key=="s3-access-key") | .textValue')
+      S3_SECRET=$(echo "$PAYLOAD" | jq -r '.entries[] | select(.key=="s3-secret-key") | .textValue')
+
+      cat > /home/ubuntu/.s3cfg <<EOF
+      [default]
+      access_key = $S3_KEY
+      secret_key = $S3_SECRET
+      host_base = storage.yandexcloud.net
+      host_bucket = %(bucket)s.storage.yandexcloud.net
+      use_https = True
+      EOF
+      chown ubuntu:ubuntu /home/ubuntu/.s3cfg
+      chmod 600 /home/ubuntu/.s3cfg
+
+      echo "=== окружение ==="
+      python3 -m venv /opt/venv
+      /opt/venv/bin/pip install --quiet --upgrade pip
+      /opt/venv/bin/pip install --quiet pillow numpy pyarrow pyyaml
+
+      # Именно profile.d, а не ~/.bashrc: стандартный ubuntu-шный .bashrc
+      # выходит на первой же строке в неинтерактивной сессии, поэтому при
+      # "ssh host команда" ни venv, ни переменная не подхватились бы. Заезд
+      # запускается как раз неинтерактивно.
+      cat > /etc/profile.d/occlusionnet.sh <<'PROFILE'
+      export PATH=/opt/venv/bin:$PATH
+      PROFILE
+      echo "export DATASETS_BUCKET=${bucket}" >> /etc/profile.d/occlusionnet.sh
+      chmod 644 /etc/profile.d/occlusionnet.sh
+
+      mkdir -p /home/ubuntu/work
+      chown -R ubuntu:ubuntu /home/ubuntu/work /opt/venv
+
+      touch /var/lib/data-vm-ready
+      echo "=== готово ==="
+
+runcmd:
+  - /usr/local/bin/bootstrap.sh
