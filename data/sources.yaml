@@ -1,0 +1,229 @@
+# Реестр источников для мультилейбл-классификации помех.
+# Схема меток — в taxonomy.yaml. Обзор кандидатов — в CANDIDATES.md.
+#
+# Проект учебный, лицензии не ограничивают использование. Единственное
+# следствие: собранный датасет не выкладывается публично.
+#
+# Правила меток:
+#   const       — метки, верные для всего источника по построению
+#   from_attrs  — из метаданных источника (sidecar csv/json)
+#   from_path   — из имени каталога
+#   manual      — метки, которые здесь принципиально не ставятся: их наличие
+#                 нельзя вывести из метаданных, только посмотреть глазами
+
+# ===========================================================================
+# Ядро: классы, которые закрываются реальной разметкой
+# ===========================================================================
+
+evocargo_raindrops:
+  title: Raindrops on Windshield
+  url: https://zenodo.org/records/4680442
+  code: https://github.com/Evocargo/RaindropsOnWindshield
+  license: CC-BY-4.0
+  size_gb: 7.4
+  frames: 8190
+  delivery: { method: http, direct: true }
+  properties: { camera: front, resolution: mixed }
+  notes: >-
+    Единственный источник с пиксельной разметкой капель и фронтальной камерой.
+    Внутри: images/<сиквенс>/*.png и зеркальный masks/ — по маске на каждый из
+    8190 кадров. Сиквенсы: 1o 2o 8o D1 D2 D3 D4 v2.
+
+    Разметка есть и в json/ в формате VIA, но только для пяти каталогов из
+    восьми, поэтому источником истины взяты маски: они полные, 1:1 с кадрами,
+    и не требуют разбора чужой схемы аннотатора.
+  layout:
+    include_regex: '^images/'          # без него каталог масок удвоил бы манифест
+    mask_from_path: ["images/", "masks/"]
+    path_regex: '^images/(?P<sequence>[^/]+)/'
+  labels:
+    from_mask:
+      nonempty: [raindrops]
+      empty: []                        # пустая маска = чистый кадр, это валидный clean
+
+woodscape_soiling:
+  title: WoodScape Soiling Dataset
+  url: https://woodscape.valeo.com/dataset
+  license: "?"
+  frames: 5000
+  delivery: { method: http, registration: true }
+  properties: { camera: fisheye_surround, resolution: [1280, 966] }
+  notes: >-
+    Классы opaque (грязь, пыль) и transparent (вода), попиксельно.
+    Камеры кругового обзора, геометрия не фронтальная — обязателен флаг
+    camera_type, иначе модель выучит fisheye-виньетирование как признак грязи.
+  labels:
+    from_attrs:
+      soiling_class:
+        opaque: [soiling]
+        transparent: [raindrops]
+
+glare:
+  title: "GLARE: Traffic Sign Detection in Sun Glare"
+  url: https://github.com/NicholasCG/GLARE_Dataset
+  paper: https://arxiv.org/abs/2209.08716
+  license: "?"
+  frames: 2157
+  delivery: { method: git }
+  properties: { camera: front, source: dashcam }
+  notes: 33 dashcam-видео США, весь набор — солнечный засвет.
+  labels:
+    const: [flare_sun]
+
+acdc:
+  title: "ACDC: Adverse Conditions Dataset with Correspondences"
+  url: https://acdc.vision.ee.ethz.ch/
+  license: "?"
+  frames: 4006
+  delivery: { method: http, registration: true }
+  properties: { camera: front, resolution: [1920, 1080] }
+  notes: >-
+    По 1000 кадров на туман, ночь, дождь, снег, плюс к каждому парный кадр
+    той же сцены при нормальных условиях. Парные кадры — основной источник
+    класса clean: та же камера, тот же маршрут, только условия другие.
+  layout:
+    path_regex: 'rgb_anon/(?P<condition>fog|night|rain|snow)/(?P<split>train|val|test)/(?P<sequence>[^/]+)/'
+  labels:
+    from_path:
+      condition:
+        fog:   [fog]
+        night: [night]
+        rain:  [rainfall]
+        snow:  [snowfall]
+    # Парные кадры лежат отдельно и метятся пустым списком — это и есть clean.
+
+sid:
+  title: "SID: Stereo Image Dataset for Autonomous Driving in Adverse Conditions"
+  doi: 10.7302/esz6-nv83
+  url: https://deepblue.lib.umich.edu/data/concern/data_sets/cc08hg37c
+  license: CC-BY-4.0
+  snapshot: "2024-07-03"
+  delivery:
+    method: globus
+    collection: DeepBlueData
+    http_blocked: true   # Cloudflare отдаёт JS-челлендж всем не-браузерным клиентам
+  properties:
+    camera: front
+    stereo: true
+    frame_rate_hz: 20
+    resolution: [1280, 720]
+    format: png
+  files:
+    Clear.zip:    { id: kw52j904w, gb: 42.5 }
+    Cloudy.zip:   { id: xp68kh09j, gb: 20.1 }
+    Overcast.zip: { id: ww72bc35s, gb: 20.7 }
+    Rain.zip:     { id: qr46r171f, gb: 35.4 }
+    Snow.zip:     { id: 8p58pd94g, gb: 75.2 }
+    SID_Sequence_Metadata.csv: { id: 5712m7491 }
+  notes: >-
+    Для классификации стерео не нужно — берём только левую камеру, это сразу
+    вдвое меньше. Метаданные по сиквенсам, включая загрязнение линзы, лежат
+    в SID_Sequence_Metadata.csv.
+  labels:
+    from_attrs:
+      Weather:
+        Rain: [rainfall]
+        Snow: [snowfall]
+        Clear: []
+        Cloudy: []
+        Overcast: []
+      TimeOfDay:
+        Night: [night]
+        Dusk:  [dusk]
+        Day:   []
+      LensSoiling:
+        true: [soiling]
+
+dark_zurich:
+  title: Dark Zurich
+  url: https://www.trace.ethz.ch/publications/2019/GCMA_UIoU/
+  license: "?"
+  delivery: { method: http }
+  properties: { camera: front, source: "GoPro Hero 5 на лобовом", resolution: [1920, 1080] }
+  notes: >-
+    2416 ночных, 2920 сумеречных, 3041 дневной кадр с соответствиями по
+    маршруту. Второй независимый источник ночи после ACDC — нужен, чтобы
+    класс night не свёлся к «узнать ACDC».
+  layout:
+    path_regex: '(?P<condition>day|twilight|night)/(?P<sequence>[^/]+)/'
+  labels:
+    from_path:
+      condition:
+        night:    [night]
+        twilight: [dusk]
+        day:      []
+
+bdd100k:
+  title: BDD100K
+  url: https://doc.bdd100k.com/
+  license: research / not-for-profit
+  frames: 100000
+  delivery: { method: http, registration: true }
+  properties: { camera: front, source: dashcam, resolution: [1280, 720] }
+  notes: >-
+    Главное сырьё под майнинг: атрибуты weather и timeofday проставлены на
+    все 100k кадров. Отсюда же берётся blur_motion порогом по sharpness и
+    основная масса clean.
+  labels:
+    from_attrs:
+      weather:
+        rainy:  [rainfall]
+        snowy:  [snowfall]
+        foggy:  [fog]
+        clear:  []
+        overcast: []
+        "partly cloudy": []
+      timeofday:
+        night:      [night]
+        "dawn/dusk": [dusk]
+        daytime:    []
+
+dawn:
+  title: "DAWN: Vehicle Detection in Adverse Weather Nature"
+  url: https://data.mendeley.com/datasets/766ygrbt8y/3
+  license: "?"
+  frames: 1000
+  delivery: { method: http, direct: true }
+  properties: { resolution: [1280, 856] }
+  notes: >-
+    Маленький, но независимый источник тумана, снега и дождя. Ценность
+    именно в независимости: не даёт классам свестись к одному датасету.
+  layout:
+    path_regex: '(?P<condition>Fog|Snow|Rain|Sand)/'
+  labels:
+    from_path:
+      condition:
+        Fog:  [fog]
+        Snow: [snowfall]
+        Rain: [rainfall]
+        # Песчаная буря вне таксономии. Именно __drop__, а не пустой список:
+        # пустой означает clean, и буря приехала бы в класс чистых кадров.
+        Sand: [__drop__]
+
+# ===========================================================================
+# Вспомогательные ресурсы: не источники кадров, а материал для синтеза
+# ===========================================================================
+
+flare7k:
+  title: Flare7K++
+  url: https://ykdai.github.io/projects/Flare7K
+  license: "?"
+  role: synthesis_asset
+  notes: >-
+    962 реально снятых блика и 7000 синтетических, разложенных на компоненты:
+    источник света, streak, glare, отражённый блик. Снято смартфоном в тёмной
+    комнате, то есть как источник кадров не годится. Используется для
+    наложения flare_light на реальные ночные кадры из BDD100K и Dark Zurich.
+
+# ===========================================================================
+# Метки без источника
+#
+# reflection и debris не покрыты ни одним публичным набором — проверено.
+# Только синтез, и валидация обязана быть на реальных кадрах, размеченных
+# вручную, иначе измеряется качество генератора.
+#
+# flare_light размеченным не бывает нигде. Ставить его автоматически по
+# признаку «ночь» нельзя: ночная съёмка на неосвещённой трассе даёт night
+# без единого блика. Либо синтез поверх ночных кадров, либо ручная разметка
+# небольшой выборки под валидацию.
+# ===========================================================================
