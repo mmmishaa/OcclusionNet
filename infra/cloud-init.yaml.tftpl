@@ -52,6 +52,25 @@ write_files:
       set -euo pipefail
       exec > >(tee -a /var/log/bootstrap.log) 2>&1
 
+      # Внешние источники из этого региона отвечают нестабильно: get.docker.com
+      # и duckdns.org уже отваливались по 300-секундному таймауту, обрывая
+      # bootstrap целиком из-за set -e. Поэтому у каждого внешнего запроса
+      # ограниченный таймаут и повторы, а не бесконечное ожидание.
+      # Фигурные скобки в подстановках не использовать: templatefile их съест.
+      fetch() {
+        url=$1
+        out=$2
+        for attempt in 1 2 3 4 5; do
+          if curl -fsSL --connect-timeout 15 --max-time 180 -o "$out" "$url"; then
+            return 0
+          fi
+          echo "  попытка $attempt не прошла: $url"
+          sleep 10
+        done
+        echo "  ВСЕ ПОПЫТКИ ИСЧЕРПАНЫ: $url"
+        return 1
+      }
+
       echo "== DNS: указываем домен на этот хост =="
       /usr/local/bin/duckdns-update.sh
       sleep 10
@@ -72,8 +91,14 @@ write_files:
       test -n "$S3_KEY" -a -n "$WEB_PASS"
       echo "секреты получены"
 
-      echo "== Docker =="
-      curl -fsSL https://get.docker.com | sh
+      echo "== Docker из репозитория дистрибутива =="
+      # Не get.docker.com: он отваливается по таймауту из этого региона и
+      # роняет весь bootstrap. Пакеты Ubuntu приезжают с mirror.yandex.ru,
+      # который в том же логе отдавал 100 МБ/с. docker-compose-v2 даёт
+      # подкоманду "docker compose", которой пользуемся ниже.
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        -o Dpkg::Options::=--force-confold docker.io docker-compose-v2
+      systemctl enable --now docker
 
       echo "== ClearML Server =="
       mkdir -p /opt/clearml/config
@@ -82,8 +107,10 @@ write_files:
       mkdir -p /opt/clearml/data/redis /opt/clearml/data/fileserver
       mkdir -p /opt/clearml/logs
       chown -R 1000:1000 /opt/clearml/data /opt/clearml/logs
-      curl -fsSL -o /opt/clearml/docker-compose.yml \
-        https://raw.githubusercontent.com/clearml/clearml-server/master/docker/docker-compose.yml
+      # TODO запинить на тег вместо master: сейчас стенд собирается из
+      # движущейся ветки и может сломаться от чужого коммита.
+      fetch https://raw.githubusercontent.com/clearml/clearml-server/master/docker/docker-compose.yml \
+            /opt/clearml/docker-compose.yml
 
       # Без этого сервер открыт на запись любому, кто знает адрес.
       cat > /opt/clearml/config/apiserver.conf <<CONF
@@ -119,10 +146,10 @@ write_files:
       cd /opt/clearml && docker compose up -d
 
       echo "== Caddy: сначала пакет, потом конфиг =="
-      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-        > /etc/apt/sources.list.d/caddy-stable.list
+      fetch 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' /tmp/caddy.key
+      gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg /tmp/caddy.key
+      fetch 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+            /etc/apt/sources.list.d/caddy-stable.list
       apt-get update
       DEBIAN_FRONTEND=noninteractive apt-get install -y \
         -o Dpkg::Options::=--force-confold caddy
