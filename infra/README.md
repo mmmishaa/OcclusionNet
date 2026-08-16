@@ -158,3 +158,17 @@ datasphere_members = ["group:aje...", "userAccount:aje..."]
 **Бюджетный алерт.** Ни в провайдере, ни в `yc` этого нет — только консоль,
 Billing → Бюджеты. Поставьте порог с уведомлением на почту, особенно при
 включённом DataSphere.
+
+**Подключение внешних IDE в DataSphere.** Настройка проекта «Режим работы
+проектов → Подключение внешних IDE», без которой нельзя прицепить VS Code к
+ядру проекта. В ресурсе `yandex_datasphere_project` поля под это нет: в
+`settings` провайдер отдаёт только `service_account_id`, `subnet_id`,
+`data_proc_cluster_id`, `default_folder_id`, `security_group_ids` и
+`stale_exec_timeout_mode`. Группы `yc datasphere` в CLI тоже нет. Включается
+руками в интерфейсе проекта, после пересоздания проекта — заново.
+
+Проверить, не появилось ли поле в новой версии провайдера:
+
+```bash
+tofu providers schema -json | jq '.provider_schemas[].resource_schemas.yandex_datasphere_project.block.attributes.settings'
+```

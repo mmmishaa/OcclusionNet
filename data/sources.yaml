@@ -62,11 +62,23 @@ glare:
   title: "GLARE: Traffic Sign Detection in Sun Glare"
   url: https://github.com/NicholasCG/GLARE_Dataset
   paper: https://arxiv.org/abs/2209.08716
-  license: "?"
+  license: CC-BY-4.0          # указана в README репозитория
   frames: 2157
-  delivery: { method: git }
+  delivery:
+    method: gdrive
+    folder: 1gmoOSgvjR4DP7jGfGS_xAmxcMShyeThx
+    # Репозиторий на гитхабе — только landing page на 1.4 КБ, данные лежат
+    # в публичной папке Google Drive. Качать её целиком нельзя: рядом с
+    # кадрами лежат 114 чекпойнтов моделей и 189 файлов треков. Берём
+    # пофайлово только Images/, список получаем через gdown --folder --json.
+    subdir: Images
   properties: { camera: front, source: dashcam }
-  notes: 33 dashcam-видео США, весь набор — солнечный засвет.
+  notes: >-
+    33 съёмки США, весь набор — солнечный засвет, поэтому метка константная.
+    Внутри Images/vid<N>/<видео>_annotations/ лежат кадры и frameAnnotations.csv
+    в формате LISA — боксы дорожных знаков, для классификации не нужны.
+  layout:
+    path_regex: '^Images/(?P<sequence>vid\d+)/'
   labels:
     const: [flare_sun]
 
@@ -91,6 +103,39 @@ acdc:
         rain:  [rainfall]
         snow:  [snowfall]
     # Парные кадры лежат отдельно и метятся пустым списком — это и есть clean.
+
+cadc:
+  title: "CADC: Canadian Adverse Driving Conditions"
+  url: http://cadcd.uwaterloo.ca/
+  devkit: https://github.com/mpitropov/cadc_devkit
+  license: CC-BY-NC-4.0
+  delivery:
+    method: http
+    direct: true
+    base: http://wiselab.uwaterloo.ca/cadcd_data
+    pattern: "{base}/{date}/{drive}/labeled.zip"
+  properties: { camera: front, resolution: [1280, 1024], drives: 75 }
+  notes: >-
+    Целиком около 100 ГБ на 75 заездов, качаем 20 по статистике из
+    cadc_dataset_route_stats.csv девкита — 24.9 ГБ, 1825 кадров передней камеры.
+
+    Отбор неслучайный. У 10 заездов в таблице стоит "Cam 00 lens snow cover =
+    Partial", то есть снег налип на объектив — это soiling поверх snowfall.
+    Ещё 10 взяты по максимуму "Snow points removed" (точки лидара,
+    отфильтрованные как снег, — прямая мера интенсивности снегопада) при
+    чистом объективе. Получается контраст внутри одного источника и одной
+    камеры: разница между классами не смешана с разницей между датасетами.
+
+    Заезды раскладываются в lens_snow/ и clear_lens/, отсюда метки из пути.
+    Из архива берётся только image_00, сам архив удаляется сразу.
+  layout:
+    path_regex: '^(?P<lens>lens_snow|clear_lens)/(?P<sequence>[^/]+)/'
+  labels:
+    const: [snowfall]
+    from_path:
+      lens:
+        lens_snow: [soiling]
+        clear_lens: []
 
 sid:
   title: "SID: Stereo Image Dataset for Autonomous Driving in Adverse Conditions"

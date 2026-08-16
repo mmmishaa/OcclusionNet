@@ -92,6 +92,12 @@ resource "yandex_datasphere_project" "main" {
   limits = {
     max_units_per_hour      = var.datasphere_max_units_per_hour
     max_units_per_execution = var.datasphere_max_units_per_execution
+
+    # Запас единиц, а не скорость расхода. При создании проекта API ставит
+    # сюда 0, и ячейки не запускаются — молча, без внятного сообщения.
+    # null оставляет поле неуправляемым: атрибут optional+computed, поэтому
+    # уже выставленное вручную значение apply не тронет.
+    balance = var.datasphere_balance
   }
 
   settings = {
