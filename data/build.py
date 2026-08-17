@@ -163,6 +163,16 @@ class RawReader:
         self.spec = spec or {}
         self.kind = self.spec.get("kind", "plain")
         self._tar_index: dict[str, dict] = {}
+        self._zips: dict[str, zipfile.ZipFile] = {}
+
+    def close(self):
+        for z in self._zips.values():
+            try:
+                z.fp.close()
+                z.close()
+            except Exception:
+                pass
+        self._zips.clear()
 
     def _key_for(self, raw_path: str) -> str:
         by_prefix = self.spec.get("key_by_prefix")
@@ -182,12 +192,12 @@ class RawReader:
             return self.store.read(key)
 
         if self.kind == "zip":
-            fh = self.store.open(key, buffered=True)
-            try:
-                with zipfile.ZipFile(fh) as z:
-                    return z.read(raw_path)
-            finally:
-                fh.close()
+            # Архив открывается один раз на ключ. Иначе на каждый кадр заново
+            # читалось бы оглавление, а у Evocargo это 8190 записей в файле на
+            # 7.4 ГБ — сборка встала бы намертво.
+            if key not in self._zips:
+                self._zips[key] = zipfile.ZipFile(self.store.open(key, buffered=True))
+            return self._zips[key].read(raw_path)
 
         if self.kind == "tar":
             # у tar нет оглавления: строим индекс один раз, дальше точное чтение
@@ -257,22 +267,19 @@ def load_recipe(path: Path) -> dict:
     return yaml.safe_load(Path(path).read_text())
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--recipe", type=Path, default=HERE / "recipe.example.yaml")
-    ap.add_argument("--manifests", type=Path, default=HERE / "manifest",
-                    help="каталог с parquet-манифестами источников")
-    ap.add_argument("--bucket", help="работать с Object Storage; ключи в S3_KEY и S3_SECRET")
-    ap.add_argument("--raw-root", type=Path,
-                    help="вместо бакета — локальный корень с той же раскладкой: "
-                         "внутри должен лежать каталог raw/")
-    ap.add_argument("--out", type=Path, default=HERE / "curated",
-                    help="куда складывать шарды локально перед выгрузкой")
-    ap.add_argument("--limit", type=int, help="взять первые N кадров на источник")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="план и калибровка без записи шардов")
-    a = ap.parse_args()
+def run(recipe_path=None, bucket=None, raw_root=None, manifests=None,
+        out=None, limit=None, dry_run=False) -> dict:
+    """Сборка датасета. Та же логика, что у командной строки, но вызываемая.
+
+    Возвращает сводку: версия, префикс записи, сколько кадров обработано.
+    """
+    class _A: pass
+    a = _A()
+    a.recipe = Path(recipe_path or (HERE / "recipe.example.yaml"))
+    a.bucket, a.raw_root = bucket, (Path(raw_root) if raw_root else None)
+    a.manifests = Path(manifests) if manifests else HERE / "manifest"
+    a.out = Path(out) if out else HERE / "curated"
+    a.limit, a.dry_run = limit, dry_run
 
     import pandas as pd
     import pyarrow as pa
@@ -295,7 +302,7 @@ def main() -> None:
     elif a.raw_root:
         store = LocalStore(a.raw_root, write_prefix=write_prefix)
     else:
-        sys.exit("нужен либо --bucket, либо --raw-root")
+        raise ValueError("нужен либо bucket, либо raw_root")
 
     # --- манифесты ----------------------------------------------------------
     if a.bucket:
@@ -307,7 +314,7 @@ def main() -> None:
     else:
         files = sorted(Path(a.manifests).glob("*.parquet"))
         if not files:
-            sys.exit(f"нет манифестов в {a.manifests}")
+            raise FileNotFoundError(f"нет манифестов в {a.manifests}")
         frames = [pq.read_table(f).to_pandas() for f in files]
 
     df = pd.concat(frames, ignore_index=True)
@@ -347,7 +354,8 @@ def main() -> None:
 
     if a.dry_run:
         print("\nсухой прогон: шарды не пишутся, бакет не трогается")
-        return
+        return {"version": version, "write_prefix": write_prefix,
+                "planned": len(df), "sigmas": sigmas, "dry_run": True}
 
     # --- обработка ----------------------------------------------------------
     local_out = Path(a.out) / version
@@ -378,6 +386,8 @@ def main() -> None:
             print(f"  обработано {done:,}")
     for w in writers.values():
         w.close()
+    for rd in readers.values():
+        rd.close()
 
     # --- манифест собранного датасета ---------------------------------------
     cur = pa.Table.from_pylist([{**m, "labels": list(m["labels"])} for m in out_rows])
@@ -404,11 +414,31 @@ def main() -> None:
             store.put(f"{write_prefix}recipe.yaml",
                       (local_out / "recipe.yaml").read_bytes())
         except WriteOutsideAllowedPrefix as exc:
-            sys.exit(f"защита сработала: {exc}")
+            raise
         print(f"\nвыгружено в s3://{a.bucket}/{write_prefix}")
         print("raw/ и manifest/ не изменялись")
     else:
         print(f"каталог: {local_out}")
+
+    return {"version": version, "write_prefix": write_prefix,
+            "done": done, "failed": failed,
+            "shards": {sp: len(w.written) for sp, w in writers.items()},
+            "local_out": str(local_out), "bucket": a.bucket}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--recipe", type=Path, default=HERE / "recipe.example.yaml")
+    ap.add_argument("--manifests", type=Path, default=HERE / "manifest")
+    ap.add_argument("--bucket", help="Object Storage; ключи в S3_KEY и S3_SECRET")
+    ap.add_argument("--raw-root", type=Path,
+                    help="вместо бакета — локальный корень с каталогом raw/ внутри")
+    ap.add_argument("--out", type=Path, default=HERE / "curated")
+    ap.add_argument("--limit", type=int)
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+    run(a.recipe, a.bucket, a.raw_root, a.manifests, a.out, a.limit, a.dry_run)
 
 
 if __name__ == "__main__":
