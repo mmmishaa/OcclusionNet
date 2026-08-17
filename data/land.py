@@ -95,7 +95,8 @@ def measure(job: tuple[Path, Path | None]) -> dict:
 # метки
 # --------------------------------------------------------------------------
 
-DROP = "__drop__"   # кадр не относится к нашей таксономии и в манифест не идёт
+DROP = "__drop__"    # кадр не относится к нашей таксономии и в манифест не идёт
+CLEAN = "__clean__"  # кадр заведомо чистый: правило гасит все прочие метки
 
 
 def resolve_labels(spec: dict, path_fields: dict, attrs: dict) -> list[str] | None:
@@ -104,6 +105,11 @@ def resolve_labels(spec: dict, path_fields: dict, attrs: dict) -> list[str] | No
     Пустой список означает clean. Чтобы выбросить кадр, правило должно давать
     __drop__: пустой список и «не наш кадр» — разные вещи, и путать их нельзя,
     иначе песчаная буря приедет в класс чистых кадров.
+
+    __clean__ гасит все прочие метки. Нужен там, где путь одновременно несёт
+    условие съёмки и признак эталона: у ACDC парные кадры лежат в каталогах
+    вида fog/train_ref, то есть по одному правилу это туман, а по другому —
+    заведомо чистый снимок той же сцены. Побеждает второе.
     """
     out: list[str] = list(spec.get("const", []))
 
@@ -122,7 +128,11 @@ def resolve_labels(spec: dict, path_fields: dict, attrs: dict) -> list[str] | No
                 out.extend(mapping[candidate])
                 break
 
-    return None if DROP in out else sorted(set(out))
+    if DROP in out:
+        return None
+    if CLEAN in out:
+        return []
+    return sorted(set(out))
 
 
 # --------------------------------------------------------------------------
@@ -256,10 +266,16 @@ def build(source: str, root: Path, out: Path, workers: int, limit: int | None) -
                 if hit:
                     fields = {k: v for k, v in hit.groupdict().items() if v is not None}
 
-            # без группы sequence в regex сиквенсом считается каталог кадра,
-            # но обязательно относительным путём: абсолютный утащил бы в
-            # манифест путь конкретной машины и сломал склейку манифестов
-            sequence = fields.get("sequence") or path.parent.relative_to(root).as_posix()
+            # sequence_id можно собрать из нескольких групп регекса — это нужно,
+            # когда имя каталога съёмки уникально только внутри своего раздела.
+            # Без группы sequence сиквенсом считается каталог кадра, обязательно
+            # относительным путём: абсолютный утащил бы в манифест путь
+            # конкретной машины и сломал склейку манифестов.
+            parts = layout.get("sequence_from")
+            if parts:
+                sequence = "/".join(str(fields.get(x, "")) for x in parts).strip("/")
+            else:
+                sequence = fields.get("sequence") or path.parent.relative_to(root).as_posix()
             attrs = attr_index.get(path.stem) or attr_index.get(sequence) or {}
 
             labels = resolve_labels(label_spec, fields, attrs)

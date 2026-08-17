@@ -90,16 +90,42 @@ glare:
 acdc:
   title: "ACDC: Adverse Conditions Dataset with Correspondences"
   url: https://acdc.vision.ee.ethz.ch/
-  license: "?"
+  paper: https://arxiv.org/abs/2104.13395
+  license: "?"                      # уточнить при регистрации
   frames: 4006
-  delivery: { method: http, registration: true }
+  delivery:
+    method: http
+    registration: true
+    # Сайт — SPA, прямые ссылки на архивы видны, но без входа отдают
+    # HTML-заглушку на 4637 байт вместо zip. Нужен аккаунт и сессионная кука.
+    archives:
+      images: https://acdc.vision.ee.ethz.ch/rgb_anon_trainvaltest.zip
+      # gt_trainval.zip — попиксельная сегментация 19 классов Cityscapes.
+      # Для классификации помех не нужна, качать незачем.
   properties: { camera: front, resolution: [1920, 1080] }
   notes: >-
-    По 1000 кадров на туман, ночь, дождь, снег, плюс к каждому парный кадр
-    той же сцены при нормальных условиях. Парные кадры — основной источник
-    класса clean: та же камера, тот же маршрут, только условия другие.
+    По 1000 кадров на туман, ночь, дождь и снег, и к каждому — парный кадр той
+    же сцены при нормальных условиях. Парные кадры и есть главная ценность:
+    это единственный способ получить clean той же камерой и того же маршрута,
+    а не «чистые кадры вообще».
+
+    Закрывает разом две наши дыры: snowfall получает второй источник помимо
+    CADC, clean — второй помимо Evocargo. Без этого больше половины датасета
+    остаётся вне оценки.
+
+    ВНИМАНИЕ: раскладка ниже написана по описанию датасета, живьём архив не
+    видели. Проверить path_regex на реальном дереве до заезда — как мы это
+    делали с Evocargo и GLARE.
+  raw_storage:
+    kind: zip
+    key: raw/acdc/rgb_anon_trainvaltest.zip
   layout:
-    path_regex: 'rgb_anon/(?P<condition>fog|night|rain|snow)/(?P<split>train|val|test)/(?P<sequence>[^/]+)/'
+    path_regex: '^rgb_anon/(?P<condition>fog|night|rain|snow)/(?P<split>train|val|test)(?P<ref>_ref)?/(?P<sequence>[^/]+)/'
+    # Имя каталога съёмки уникально внутри условия, но не обязательно между
+    # ними, поэтому в sequence_id идёт и условие. Парный эталон при этом
+    # остаётся в том же сиквенсе, что и исходный кадр, — и попадает в ту же
+    # выборку. Иначе модель увидит одну сцену и в train, и в test.
+    sequence_from: [condition, sequence]
   labels:
     from_path:
       condition:
@@ -107,7 +133,11 @@ acdc:
         night: [night]
         rain:  [rainfall]
         snow:  [snowfall]
-    # Парные кадры лежат отдельно и метятся пустым списком — это и есть clean.
+      # Парные кадры лежат в каталогах вида fog/train_ref. По условию из пути
+      # это туман, но по факту — эталонный снимок при нормальной погоде,
+      # поэтому __clean__ гасит остальные метки.
+      ref:
+        _ref: [__clean__]
 
 cadc:
   title: "CADC: Canadian Adverse Driving Conditions"
