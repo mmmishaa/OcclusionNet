@@ -23,6 +23,11 @@ evocargo_raindrops:
   size_gb: 7.4
   frames: 8190
   delivery: { method: http, direct: true }
+  # Как стадия build добирается до исходных байт кадра. Единственное место,
+  # где это описано: кода на источник нет.
+  raw_storage:
+    kind: zip
+    key: raw/evocargo_raindrops/RaindropsOnWindshield.zip
   properties: { camera: front, resolution: mixed }
   notes: >-
     Единственный источник с пиксельной разметкой капель и фронтальной камерой.
@@ -114,6 +119,11 @@ cadc:
     direct: true
     base: http://wiselab.uwaterloo.ca/cadcd_data
     pattern: "{base}/{date}/{drive}/labeled.zip"
+  raw_storage:
+    kind: tar
+    key_by_prefix:
+      lens_snow:  raw/cadc/lens_snow.tar
+      clear_lens: raw/cadc/clear_lens.tar
   properties: { camera: front, resolution: [1280, 1024], drives: 75 }
   notes: >-
     Целиком около 100 ГБ на 75 заездов, качаем 20 по статистике из
