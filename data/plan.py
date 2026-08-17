@@ -71,29 +71,63 @@ def apply_balance(df: pd.DataFrame, recipe: dict, seed: int) -> pd.DataFrame:
     return out
 
 
+def _greedy(seq_sizes: dict[str, int], ratios: dict[str, float],
+            seed: str) -> dict[str, str]:
+    """Раздаёт сиквенсы по выборкам, выравнивая доли КАДРОВ, а не сиквенсов.
+
+    Сиквенсы сильно разного размера: у Evocargo по 1700 кадров, у CADC по 100.
+    Если делить по счёту сиквенсов, доли кадров разъезжаются — на первой сборке
+    вышло 22% в val вместо 15%. Поэтому сиквенсы идут от большего к меньшему, и
+    каждый достаётся выборке с наибольшим отставанием от своей квоты.
+
+    Порядок при равных размерах задаётся хешем: воспроизводимо и не зависит от
+    порядка строк в манифесте.
+    """
+    total = sum(seq_sizes.values())
+    target = {k: total * v for k, v in ratios.items()}
+    got = {k: 0 for k in ratios}
+    out: dict[str, str] = {}
+
+    order = sorted(seq_sizes,
+                   key=lambda n: (-seq_sizes[n],
+                                  hashlib.sha1(f"{seed}|{n}".encode()).hexdigest()))
+    for name in order:
+        part = max(ratios, key=lambda k: target[k] - got[k])
+        out[name] = part
+        got[part] += seq_sizes[name]
+
+    # каждая выборка должна получить хотя бы один сиквенс, если их хватает
+    n = len(order)
+    if n >= len(ratios):
+        for part in ratios:
+            if part not in out.values():
+                donor = max((x for x in order if
+                             sum(1 for y in order if out[y] == out[x]) > 1),
+                            key=lambda x: seq_sizes[x], default=None)
+                if donor is not None:
+                    out[donor] = part
+    return out
+
+
 def assign_splits(df: pd.DataFrame, recipe: dict) -> pd.DataFrame:
-    """Раздаёт train/val/test ЦЕЛЫМИ сиквенсами.
+    """Раздаёт train/val/test ЦЕЛЫМИ сиквенсами, согласованно между источниками.
 
     По кадрам резать нельзя: при съёмке 10-20 Гц соседние кадры почти
     идентичны, и случайный сплит кладёт в тест те же изображения, что в трейн.
-    Метрики получаются завышенными, а на новой съёмке модель разваливается.
+
+    По источникам резать независимо тоже нельзя: выборка может целиком достаться
+    одному датасету, и метрика будет про него, а не про помеху.
     """
     sp = recipe.get("splits") or {}
     ratios = sp.get("ratios") or {"train": 0.7, "val": 0.15, "test": 0.15}
     seed = int(sp.get("seed", 0))
 
-    # доминирующее сочетание меток сиквенса — по нему стратифицируем
     df = df.assign(_combo=df.labels.apply(_combo))
     seqs = (df.groupby(["source", "sequence_id"])["_combo"]
               .agg(lambda s: s.value_counts().index[0])
               .reset_index(name="combo"))
+    counts = df.groupby(["source", "sequence_id"]).size()   # кадров в сиквенсе
 
-    # Метки, представленные единственным источником, не идут в val и test:
-    # иначе оценка меряет узнавание датасета, а не помехи.
-    #
-    # Считать надо по ОТДЕЛЬНЫМ меткам, а не по сочетаниям: иначе snowfall и
-    # snowfall+soiling выглядят как две разные метки, и snowfall с двумя
-    # источниками ошибочно признаётся слабым.
     min_src = int((recipe.get("balance") or {}).get("min_sources_per_label", 1))
     pairs = [(l, s) for ls, s in zip(df.labels, df.source) for l in (list(ls) or ["clean"])]
     per_label = (pd.DataFrame(pairs, columns=["label", "source"])
@@ -102,33 +136,33 @@ def assign_splits(df: pd.DataFrame, recipe: dict) -> pd.DataFrame:
     if weak_labels:
         print(f"меток с источниками < {min_src}: {sorted(weak_labels)}")
 
-    def is_weak(combo: str) -> bool:
-        """Сиквенс уходит только в train, если ВСЕ его метки слабые.
+    assign: dict[tuple[str, str], str] = {}
+    for combo, grp in seqs.groupby("combo"):
+        sources = sorted(grp.source.unique())
 
-        Если хотя бы одна метка обеспечена двумя источниками, сиквенс нужен в
-        оценке — иначе сильная метка останется без val и test за компанию.
-        """
-        return set(combo.split("+")) <= weak_labels
-
-    assign = {}
-    for (src, combo), grp in seqs.groupby(["source", "combo"]):
-        names = sorted(grp.sequence_id)
-        # порядок задаётся хешем от имени и seed: воспроизводимо и не зависит
-        # от порядка строк в манифесте
-        names.sort(key=lambda n: hashlib.sha1(f"{seed}|{src}|{n}".encode()).hexdigest())
-        if is_weak(combo):
-            for n in names:
-                assign[(src, n)] = "train"
+        # все метки сочетания слабые — сочетание не идёт в оценку
+        if set(combo.split("+")) <= weak_labels:
+            for r in grp.itertuples():
+                assign[(r.source, r.sequence_id)] = "train"
             continue
-        n_total = len(names)
-        n_train = max(1, round(n_total * ratios.get("train", 0.7)))
-        n_val = round(n_total * ratios.get("val", 0.15))
-        if n_total >= 3:
-            n_val = max(1, n_val)
-        for i, n in enumerate(names):
-            assign[(src, n)] = ("train" if i < n_train
-                                else "val" if i < n_train + n_val
-                                else "test")
+
+        proposal: dict[tuple[str, str], str] = {}
+        for src in sources:
+            names = sorted(grp[grp.source == src].sequence_id)
+            sizes = {n: int(counts.get((src, n), 0)) for n in names}
+            for name, part in _greedy(sizes, ratios, f"{seed}|{src}").items():
+                proposal[(src, name)] = part
+
+        # проверка согласованности: и val, и test должны собрать min_src источников
+        cover = {part: {src for (src, _), p in proposal.items() if p == part}
+                 for part in ("val", "test")}
+        thin = [p for p in ("val", "test") if len(cover[p]) < min_src]
+        if thin:
+            print(f"  {combo}: {', '.join(thin)} собрали бы меньше {min_src} "
+                  f"источников — сочетание уходит только в train")
+            for key in proposal:
+                proposal[key] = "train"
+        assign.update(proposal)
 
     out = df.drop(columns="_combo").copy()
     out["split"] = [assign[(s, q)] for s, q in zip(out.source, out.sequence_id)]
@@ -149,6 +183,26 @@ def build_plan(df: pd.DataFrame, recipe: dict) -> pd.DataFrame:
 
     leak = (out.groupby("sequence_id")["split"].nunique() > 1).sum()
     print(f"\nсиквенсов, попавших в несколько выборок: {leak}  (должно быть 0)")
+
+    # Доли по всему датасету ни о чём не говорят: метки с одним источником
+    # уходят в train целиком и перекашивают картину. Смысл имеет доля внутри
+    # той части, которая вообще участвует в оценке.
+    ev_labels = {l for ls in out[out.split != "train"].labels for l in ls} or {"clean"}
+    ev = out[out.labels.apply(lambda ls: bool(set(ls) & ev_labels))]
+    if len(ev):
+        print("\nдоли выборок среди оцениваемых меток "
+              f"({', '.join(sorted(ev_labels))}):")
+        for part in ("train", "val", "test"):
+            c = int((ev.split == part).sum())
+            print(f"  {part:<6}{c:>6}  {100*c/len(ev):5.1f}%")
+        print(f"  вне оценки (только train): {len(out) - len(ev):,} кадров")
+
+    print("\nисточники внутри выборок (по меткам, идущим в оценку):")
+    ev = out[out.split != "train"]
+    if len(ev):
+        print(ev.assign(метка=ev.labels.apply(_combo))
+                .groupby(["метка", "split"])["source"].nunique()
+                .rename("источников").to_string())
 
     for part in ("val", "test"):
         if (out.split == part).sum() == 0:
