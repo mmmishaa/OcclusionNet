@@ -37,6 +37,9 @@ import numpy as np
 import yaml
 from PIL import Image, ImageFilter
 
+from .plan import build_plan
+from .s3io import LocalStore, S3Store, WriteOutsideAllowedPrefix, client as s3_client
+
 HERE = Path(__file__).parent
 METRIC_HEIGHT = 256          # та же нормировка, что в land.py
 
@@ -202,21 +205,6 @@ class RawReader:
         raise ValueError(f"неизвестный kind: {self.kind}")
 
 
-class LocalStore:
-    """Сырьё в каталоге на диске — для проверки пайплайна без облака."""
-
-    def __init__(self, root: Path):
-        self.root = Path(root)
-
-    def open(self, key: str, buffered: bool = True):
-        return open(self.root / key, "rb")
-
-    def read(self, key: str, offset: int = 0, size: int | None = None) -> bytes:
-        with open(self.root / key, "rb") as f:
-            f.seek(offset)
-            return f.read(size if size is not None else -1)
-
-
 # --------------------------------------------------------------------------
 # сборка
 # --------------------------------------------------------------------------
@@ -275,38 +263,65 @@ def main() -> None:
     ap.add_argument("--recipe", type=Path, default=HERE / "recipe.example.yaml")
     ap.add_argument("--manifests", type=Path, default=HERE / "manifest",
                     help="каталог с parquet-манифестами источников")
+    ap.add_argument("--bucket", help="работать с Object Storage; ключи в S3_KEY и S3_SECRET")
     ap.add_argument("--raw-root", type=Path,
-                    help="локальный корень, повторяющий раскладку бакета: внутри "
-                         "должен лежать каталог raw/, потому что ключи в "
-                         "sources.yaml — это ключи объектов S3")
-    ap.add_argument("--out", type=Path, default=HERE / "curated")
-    ap.add_argument("--limit", type=int, help="взять первые N кадров, для проверки")
+                    help="вместо бакета — локальный корень с той же раскладкой: "
+                         "внутри должен лежать каталог raw/")
+    ap.add_argument("--out", type=Path, default=HERE / "curated",
+                    help="куда складывать шарды локально перед выгрузкой")
+    ap.add_argument("--limit", type=int, help="взять первые N кадров на источник")
     ap.add_argument("--dry-run", action="store_true",
-                    help="только калибровка и план, без записи шардов")
+                    help="план и калибровка без записи шардов")
     a = ap.parse_args()
 
     import pandas as pd
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
     recipe = load_recipe(a.recipe)
     spec = FrameSpec.from_recipe(recipe)
     sources = yaml.safe_load((HERE / "sources.yaml").read_text())
 
-    files = sorted(Path(a.manifests).glob("*.parquet"))
-    if not files:
-        sys.exit(f"нет манифестов в {a.manifests}")
-    df = pd.concat([pq.read_table(f).to_pandas() for f in files], ignore_index=True)
+    name = recipe.get("name", "dataset")
+    version = f"{name}-{recipe_hash(recipe)}"
+    # Единственное место, куда стадии разрешено писать. raw/ и manifest/ она
+    # открывает только на чтение: заезд стоил времени и трафика, а испорченный
+    # архив восстанавливается лишь повторным скачиванием.
+    write_prefix = f"curated/{version}/"
+
+    if a.bucket:
+        store = S3Store(s3_client(), a.bucket, write_prefix=write_prefix)
+        print(f"бакет {a.bucket}, запись только под {write_prefix}")
+    elif a.raw_root:
+        store = LocalStore(a.raw_root, write_prefix=write_prefix)
+    else:
+        sys.exit("нужен либо --bucket, либо --raw-root")
+
+    # --- манифесты ----------------------------------------------------------
+    if a.bucket:
+        frames = []
+        for o in store.list("manifest/"):
+            k = o["Key"]
+            if k.endswith(".parquet") and "archive/" not in k:
+                frames.append(pq.read_table(io.BytesIO(store.read(k))).to_pandas())
+    else:
+        files = sorted(Path(a.manifests).glob("*.parquet"))
+        if not files:
+            sys.exit(f"нет манифестов в {a.manifests}")
+        frames = [pq.read_table(f).to_pandas() for f in files]
+
+    df = pd.concat(frames, ignore_index=True)
     df = df[df.error.isna()].copy()
     if a.limit:
         df = df.groupby("source", group_keys=False).head(a.limit)
 
-    print(f"рецепт {a.recipe.name}, хеш {recipe_hash(recipe)}")
+    print(f"\nрецепт {a.recipe.name}, версия {version}")
     print(f"кадров на входе: {len(df):,}, источников: {df.source.nunique()}")
     print(f"целевой кадр: {spec.size}x{spec.size} {spec.fmt} q{spec.quality}, {spec.fit}\n")
 
-    if a.raw_root is None:
-        sys.exit("укажите --raw-root: работа напрямую с S3 запускается из блокнота")
-    store = LocalStore(a.raw_root)
+    # --- план: отбор и сплиты, всё по таблице -------------------------------
+    df = build_plan(df, recipe)
+
     readers = {s: RawReader(store, (sources.get(s) or {}).get("raw_storage"))
                for s in df.source.unique()}
 
@@ -315,33 +330,34 @@ def main() -> None:
     sigmas = {s: 0.0 for s in readers}
     if equalize:
         n = int((recipe.get("target") or {}).get("calibration_frames", 24))
-        medians = {}
-        cache = {}
+        cache, medians = {}, {}
         for src in readers:
-            rows = df[df.source == src].sample(min(n, (df.source == src).sum()),
+            rows = df[df.source == src].sample(min(n, int((df.source == src).sum())),
                                                random_state=0)
             cache[src] = [readers[src].read(r.raw_path) for r in rows.itertuples()]
             medians[src] = float(np.median([process(b, spec)[1] for b in cache[src]]))
         target = min(medians.values())
-        print("резкость после нормализации геометрии (медиана по выборке):")
+        print("\nрезкость после нормализации геометрии (медиана по выборке):")
         for src, m in medians.items():
             print(f"  {src:<24} {m:8.1f}")
-        print(f"приводим к самому мягкому: {target:.1f}\n")
+        print(f"приводим к самому мягкому: {target:.1f}")
         for src in readers:
             sigmas[src] = calibrate_sigma(cache[src], spec, target)
             print(f"  {src:<24} размытие sigma = {sigmas[src]}")
-        print()
 
     if a.dry_run:
-        print("сухой прогон, шарды не пишутся")
+        print("\nсухой прогон: шарды не пишутся, бакет не трогается")
         return
 
     # --- обработка ----------------------------------------------------------
-    out = Path(a.out) / f"{recipe.get('name','dataset')}-{recipe_hash(recipe)}"
-    writer = ShardWriter(out, recipe.get("name", "dataset"),
-                         shard_bytes=int((recipe.get("output") or {})
-                                         .get("shard_bytes_mb", 512)) * 1024**2)
+    local_out = Path(a.out) / version
+    writers = {sp: ShardWriter(local_out / sp, f"{name}-{sp}",
+                               shard_bytes=int((recipe.get("output") or {})
+                                               .get("shard_bytes_mb", 512)) * 1024**2)
+               for sp in sorted(df.split.unique())}
+
     done = failed = 0
+    out_rows = []
     for r in df.itertuples():
         try:
             raw = readers[r.source].read(r.raw_path)
@@ -351,23 +367,48 @@ def main() -> None:
             if failed <= 5:
                 print(f"  пропущен {r.source}/{r.raw_path}: {type(exc).__name__}: {exc}")
             continue
-        writer.add(r.frame_uid, img, {
-            "frame_uid": r.frame_uid,
-            "source": r.source,
-            "sequence_id": r.sequence_id,
-            "labels": list(r.labels),
-            "sharpness_out": round(sharp, 2),
-            "sigma": sigmas[r.source],
-        })
+        meta = {"frame_uid": r.frame_uid, "source": r.source,
+                "sequence_id": r.sequence_id, "labels": list(r.labels),
+                "split": r.split, "sharpness_out": round(sharp, 2),
+                "sigma": sigmas[r.source]}
+        writers[r.split].add(r.frame_uid, img, meta)
+        out_rows.append({**meta, "bytes": len(img)})
         done += 1
         if done % 500 == 0:
             print(f"  обработано {done:,}")
-    writer.close()
+    for w in writers.values():
+        w.close()
 
-    (out / "recipe.yaml").write_text(yaml.safe_dump(recipe, allow_unicode=True,
-                                                    sort_keys=False))
-    print(f"\nготово: {done:,} кадров, пропущено {failed}, шардов {len(writer.written)}")
-    print(f"каталог: {out}")
+    # --- манифест собранного датасета ---------------------------------------
+    cur = pa.Table.from_pylist([{**m, "labels": list(m["labels"])} for m in out_rows])
+    buf = io.BytesIO()
+    pq.write_table(cur, buf, compression="zstd")
+
+    (local_out / "recipe.yaml").write_text(
+        yaml.safe_dump(recipe, allow_unicode=True, sort_keys=False))
+    (local_out / "manifest.parquet").write_bytes(buf.getvalue())
+
+    print(f"\nготово: {done:,} кадров, пропущено {failed}")
+    for sp, w in writers.items():
+        print(f"  {sp:<6} шардов {len(w.written)}")
+
+    # --- выгрузка ------------------------------------------------------------
+    if a.bucket:
+        try:
+            for sp, w in writers.items():
+                for fname in w.written:
+                    key = f"{write_prefix}{sp}/{fname}"
+                    store.put_file(key, local_out / sp / fname)
+                    print("  ->", key)
+            store.put(f"{write_prefix}manifest.parquet", buf.getvalue())
+            store.put(f"{write_prefix}recipe.yaml",
+                      (local_out / "recipe.yaml").read_bytes())
+        except WriteOutsideAllowedPrefix as exc:
+            sys.exit(f"защита сработала: {exc}")
+        print(f"\nвыгружено в s3://{a.bucket}/{write_prefix}")
+        print("raw/ и manifest/ не изменялись")
+    else:
+        print(f"каталог: {local_out}")
 
 
 if __name__ == "__main__":
