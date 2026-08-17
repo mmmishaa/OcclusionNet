@@ -128,14 +128,29 @@ cadc:
 
     Заезды раскладываются в lens_snow/ и clear_lens/, отсюда метки из пути.
     Из архива берётся только image_00, сам архив удаляется сразу.
+
+    ВАЖНО про метки, проверено глазами по выборке кадров.
+
+    Группа lens_snow — это все заезды 2018 года. На них голый мокрый асфальт
+    без снега, а на стекле капли и потёки талой воды. Это raindrops, а не
+    soiling: soiling у нас определён как непрозрачная грязь, а тут прозрачная
+    вода. И это не snowfall: снега в воздухе там нет, что подтверждается и
+    таблицей — Snow points removed 42..557 при Road snow cover = None.
+
+    Группа clear_lens — все заезды 2019-02-27. Здесь настоящий снегопад:
+    дорога в снегу, хлопья видны в воздухе. Но капли на стекле попадаются и
+    тут, хотя в таблице стоит lens snow cover = None. Аннотация в CADC даётся
+    на заезд целиком и на отдельные кадры переносится приблизительно.
+
+    Вывод: soiling с фронтальной камеры CADC не даёт. Единственный источник
+    этого класса снова WoodScape, а он fisheye.
   layout:
     path_regex: '^(?P<lens>lens_snow|clear_lens)/(?P<sequence>[^/]+)/'
   labels:
-    const: [snowfall]
     from_path:
       lens:
-        lens_snow: [soiling]
-        clear_lens: []
+        lens_snow:  [raindrops]      # талая вода на стекле, снега в кадре нет
+        clear_lens: [snowfall]       # снегопад; часть кадров ещё и с каплями
 
 sid:
   title: "SID: Stereo Image Dataset for Autonomous Driving in Adverse Conditions"
