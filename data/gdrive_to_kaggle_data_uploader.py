@@ -4,15 +4,26 @@ import shutil
 import subprocess
 from pathlib import Path
 from dotenv import dotenv_values
-from google.colab import drive # type: ignore
+from google.colab import drive  # type: ignore
 
 drive.mount("/content/drive")
 
 CONFIG_PATH = "config.env"
-
 config = dotenv_values(CONFIG_PATH)
-os.environ["KAGGLE_USERNAME"] = config["KAGGLE_USERNAME"]
-os.environ["KAGGLE_KEY"] = config["KAGGLE_KEY"]
+
+kaggle_token = config.get("KAGGLE_API_TOKEN") or config.get("KAGGLE_KEY", "")
+kaggle_username = config.get("KAGGLE_USERNAME", "")
+
+os.environ["KAGGLE_API_TOKEN"] = kaggle_token
+os.environ["KAGGLE_USERNAME"] = kaggle_username
+os.environ["KAGGLE_KEY"] = kaggle_token
+
+kaggle_dir = Path.home() / ".kaggle"
+kaggle_dir.mkdir(exist_ok=True)
+
+token_file = kaggle_dir / "access_token"
+token_file.write_text(kaggle_token.strip(), encoding="utf-8")
+os.chmod(token_file, 0o600)
 
 source_path = Path(
     config.get(
@@ -35,7 +46,7 @@ for item in source_path.iterdir():
 
 metadata = {
     "title": config.get("DATASET_TITLE", "Occlusion Dataset"),
-    "id": f"{config['KAGGLE_USERNAME']}/{config.get('DATASET_SLUG', 'occlusion-dataset')}",
+    "id": f"{kaggle_username}/{config.get('DATASET_SLUG', 'occlusion-dataset')}",
     "licenses": [{"name": "CC0-1.0"}],
 }
 
