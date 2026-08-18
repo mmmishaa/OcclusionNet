@@ -28,13 +28,13 @@ Datasets/
 |           ├── train/
 |           └── test/
 │
-├── .../
-│   ├── .../
-│   │   ├── train/
-│   │   └── test/
-│   └── .../
-│       ├── train/
-│       └── test/
+├── Raindrops/
+│   ├── train/
+│   └── test/
+│
+├── Snowflakes/
+│   ├── train/
+│   └── test/
 │
 ├── .../
 │   ├── .../
@@ -111,9 +111,17 @@ Datasets/
   * Сплит: по сессиям `YYYY-MM-DD_HH-MM-SS` -> Train: **629**, Test: **176**
   * Геометрия: Bicubic Downscale ($1689 \times 901 \rightarrow 960 \times 512$) + Center Crop $512 \times 512$
 
-## 3
+## 3. Raindrops
 
-## 4
+Данные собирались из 2 датасетов:
+
+* **evocargo**
+
+* **CADC**
+
+## 4. Snowflakes
+
+CADC Dataset
 
 ## 5
 
