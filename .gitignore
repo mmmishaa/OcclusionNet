@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 data/manifest/
 .env
+dataset_export/
