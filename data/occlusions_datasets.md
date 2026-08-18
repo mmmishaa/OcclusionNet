@@ -4,6 +4,10 @@
 
 https://drive.google.com/drive/folders/1P81qiLkSbpOT2rNEV-64RXUGqdlRCUep?usp=drive_link
 
+Ссылка на датасет на kaggle:
+
+https://www.kaggle.com/datasets/mishasavinov/occlusion-dataset
+
 # Структура папки Datasets:
 
 ```text
